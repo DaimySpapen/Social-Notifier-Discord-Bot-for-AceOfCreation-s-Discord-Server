@@ -38,7 +38,7 @@ function getNextApiKey() {
     return key;
 }
 
-// function to test all API keys
+// function to test all api keys
 async function testApiKeys() {
     console.log('Testing API keys...');
     for (const apiKey of apiKeys) {
@@ -61,7 +61,7 @@ async function testApiKeys() {
 // function to check youtube api
 async function checkNewVideo() {
     try {
-        const apiKey = getNextApiKey(); // get the next API key
+        const apiKey = getNextApiKey(); // get the next api key
         const channelId = process.env.YOUTUBE_CHANNEL_ID;
         const url = `https://www.googleapis.com/youtube/v3/search?key=${apiKey}&channelId=${channelId}&part=snippet,id&order=date&maxResults=1`;
 
@@ -72,7 +72,7 @@ async function checkNewVideo() {
             const video = data.items[0];
             const videoId = video.id.videoId;
 
-            if (videoId && videoId !== lastVideoId) {
+            if (videoId && videoId !== lastVideoId) {  // if id after check isn't the same as before
                 lastVideoId = videoId;
                 saveLastVideoId(videoId); // save newest video id in json file
                 notifyDiscord(videoId);
@@ -99,16 +99,24 @@ client.once('ready', async () => {
     
     loadLastVideoId();
 
- // Set custom status and activity
- client.user.setPresence({
-    status: 'online',
-    activities: [
-        {
-            name: 'AceOfCreations',
-            type: ActivityType.Watching
-        }
-    ]
-});
+// the list for statuses that the bot can switch to
+const statuses = [
+    { name: 'AceOfCreation', type: ActivityType.Listening},
+    { name: 'you', type: ActivityType.Watching}, // hehe, you are not safe lol (jk)
+];
+
+let currentIndex = 0;
+
+// switch status each 10 seconds
+setInterval(() => {
+    const nextStatus = statuses[currentIndex];
+    client.user.setPresence({
+        status: 'online',
+        activities: [nextStatus],
+    });
+
+    currentIndex = (currentIndex + 1) % statuses.length; // go to next status
+}, 10000);
 
     // test api keys at startup
     await testApiKeys();
