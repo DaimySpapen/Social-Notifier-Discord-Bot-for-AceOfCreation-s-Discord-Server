@@ -1,130 +1,169 @@
-const { Client, GatewayIntentBits, ActivityType } = require('discord.js'); // the library that makes everything work with discord (discord api wrapper)
-const fetch = require('node-fetch');  // for sending api requests
-const cron = require('node-cron');  // for setting intervals
-const fs = require('fs');  // for reading/writing json files
-require('dotenv').config();  // configuration file for sensitive information (like discord token and youtube api keys)
+const { Client, GatewayIntentBits, ActivityType } = require('discord.js'); // discord api wrapper
+const fetch = require('node-fetch'); // for api requests
+const cron = require('node-cron'); // for intervals
+const fs = require('fs'); // for writing/reading json files
+require('dotenv').config(); // configuration file for sensitive information (like discord token and youtube api keys)
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-const lastVideoFile = 'lastVideo.json'; // json file for saving newest video id
-let lastVideoId = null;
+const videoDataFile = 'videos.json'; // json file for video ids
+let lastVideos = []; // array to save last 3 video ids
+let isCheckingVideo = false; // lock for overlapping api calls
 
-// array of api keys to use for rotation
+// api key array voor rotatie
 const apiKeys = [
     process.env.YOUTUBE_API_KEY_1,
     process.env.YOUTUBE_API_KEY_2,
     process.env.YOUTUBE_API_KEY_3,
     process.env.YOUTUBE_API_KEY_4
 ];
-let apiKeyIndex = 0; // tracks which api key to use
+let apiKeyIndex = 0; // track current api key
 
-// function to load the newest video id
-function loadLastVideoId() {
-    if (fs.existsSync(lastVideoFile)) {
-        const data = JSON.parse(fs.readFileSync(lastVideoFile, 'utf-8'));
-        lastVideoId = data.lastVideoId || null;
+// load saved video ids on start
+function loadVideoData() {
+    if (fs.existsSync(videoDataFile)) {
+        const data = JSON.parse(fs.readFileSync(videoDataFile, 'utf-8'));
+        lastVideos = data.videoIds || [];
     }
 }
 
-// function to save the newest video ID
-function saveLastVideoId(videoId) {
-    fs.writeFileSync(lastVideoFile, JSON.stringify({ lastVideoId: videoId }, null, 2), 'utf-8');
+// save the last 3 video ids
+function saveVideoData() {
+    fs.writeFileSync(
+        videoDataFile,
+        JSON.stringify({ videoIds: lastVideos.slice(-3) }, null, 2),
+        'utf-8'
+    );
 }
 
-// function to get the next api key (rotating through the array)
+// get next api key
 function getNextApiKey() {
     const key = apiKeys[apiKeyIndex];
-    apiKeyIndex = (apiKeyIndex + 1) % apiKeys.length; // rotate to the next key
+    apiKeyIndex = (apiKeyIndex + 1) % apiKeys.length;
     return key;
 }
 
-// function to test all api keys
+// better api key rotation with fallback
+async function fetchWithRetries(url) {
+    let retries = 0;
+    while (retries < apiKeys.length) {
+        const apiKey = getNextApiKey();
+        const fullUrl = `${url}&key=${apiKey}`;
+        try {
+            const response = await fetch(fullUrl);
+            const data = await response.json();
+            if (data.error) {
+                console.error(`API Key Error (${apiKey}):`, data.error.message);
+                retries++;
+            } else {
+                return data;
+            }
+        } catch (error) {
+            console.error(`Fetch error with API key (${apiKey}):`, error);
+            retries++;
+        }
+    }
+    console.error('All API keys failed.');
+    return null;
+}
+
+// check for new videos
+async function checkNewVideo() {
+    if (isCheckingVideo) return; // prevent overlap
+    isCheckingVideo = true;
+
+    try {
+        const channelId = process.env.YOUTUBE_CHANNEL_ID;
+        const url = `https://www.googleapis.com/youtube/v3/search?channelId=${channelId}&part=snippet,id&order=date&maxResults=1`;
+
+        const data = await fetchWithRetries(url);
+        if (!data || !data.items || data.items.length === 0) {
+            console.error('Invalid or empty response from YouTube API.');
+            return;
+        }
+
+        // filter only video items
+        const validVideos = data.items.filter(item => item.id.kind === 'youtube#video');
+        const ignoredItems = data.items.filter(item => item.id.kind !== 'youtube#video');
+
+        if (ignoredItems.length > 0) {
+            console.warn('Non-video items found in response:', ignoredItems.map(item => item.id.kind));
+        }
+
+        if (validVideos.length > 0) {
+            const latestVideo = validVideos[0];
+            if (!lastVideos.includes(latestVideo.id.videoId)) {
+                lastVideos.push(latestVideo.id.videoId);
+                notifyDiscord(latestVideo.id.videoId);
+
+                // keep only the last 3 videos
+                lastVideos = lastVideos.slice(-3);
+                saveVideoData();
+            } else {
+                console.log('No new videos found.');
+            }
+        } else {
+            console.log('No valid video items found in the response.');
+        }
+    } catch (error) {
+        console.error('Error checking for new videos:', error);
+    } finally {
+        isCheckingVideo = false;
+    }
+}
+
+// send notifications to discord
+function notifyDiscord(videoId) {
+    const channel = client.channels.cache.get(process.env.DISCORD_CHANNEL_ID);
+    if (channel) {
+        channel.send(`Hey @everyone, AceOfCreation just posted a new video! 🎥 Check it out:\nhttps://www.youtube.com/watch?v=${videoId}`);
+        console.log(`Notified about video: ${videoId}`);
+    } else {
+        console.error('Discord channel not found.');
+    }
+}
+
+// start bot and set status
+client.once('ready', () => {
+    console.log(`Logged in as ${client.user.tag}`);
+    loadVideoData();
+
+    const statuses = [
+        { name: 'AceOfCreation', type: ActivityType.Listening },
+        { name: 'you', type: ActivityType.Watching }  // funny?:)
+    ];
+
+    let currentIndex = 0;
+    setInterval(() => {
+        const nextStatus = statuses[currentIndex];
+        client.user.setPresence({
+            status: 'online',
+            activities: [nextStatus],
+        });
+        currentIndex = (currentIndex + 1) % statuses.length;
+    }, 10000);
+
+    cron.schedule('*/3 * * * *', checkNewVideo); // every 3 minutes check for video ids
+});
+
+// test api keys on startup
 async function testApiKeys() {
     console.log('Testing API keys...');
     for (const apiKey of apiKeys) {
         try {
-            const testUrl = `https://www.googleapis.com/youtube/v3/search?key=${apiKey}&part=snippet&maxResults=1`;
+            const testUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&maxResults=1&key=${apiKey}`;
             const response = await fetch(testUrl);
             const data = await response.json();
-
             if (data.error) {
-                console.error(`API Key Test Failed: ${apiKey} - ${data.error.message}`);
+                console.error(`API Key Test Failed (${apiKey}): ${data.error.message}`);
             } else {
                 console.log(`API Key Working: ${apiKey}`);
             }
         } catch (error) {
-            console.error(`Error testing API key: ${apiKey}`, error);
+            console.error(`Error testing API key (${apiKey}):`, error);
         }
     }
 }
 
-// function to check youtube api
-async function checkNewVideo() {
-    try {
-        const apiKey = getNextApiKey(); // get the next api key
-        const channelId = process.env.YOUTUBE_CHANNEL_ID;
-        const url = `https://www.googleapis.com/youtube/v3/search?key=${apiKey}&channelId=${channelId}&part=snippet,id&order=date&maxResults=1`;
-
-        const response = await fetch(url);
-        const data = await response.json();
-
-        if (data.items && data.items.length > 0) {
-            const video = data.items[0];
-            const videoId = video.id.videoId;
-
-            if (videoId && videoId !== lastVideoId) {  // if id after check isn't the same as before
-                lastVideoId = videoId;
-                saveLastVideoId(videoId); // save newest video id in json file
-                notifyDiscord(videoId);
-            }
-        }
-    } catch (error) {
-        console.error('Error checking YouTube API:', error);
-    }
-}
-
-// function to send a notification in the discord server
-function notifyDiscord(videoId) {
-    const channel = client.channels.cache.get(process.env.DISCORD_CHANNEL_ID);
-    if (channel) {
-        channel.send(`Hey @everyone, AceOfCreation just posted a video! Go check it out!\nhttps://www.youtube.com/watch?v=${videoId}`);
-    } else {
-        console.error('Channel not found'); // this should not happen lol
-    }
-}
-
-// start the bot
-client.once('ready', async () => {
-    console.log(`Logged in as ${client.user.tag}`);
-    
-    loadLastVideoId();
-
-// the list for statuses that the bot can switch to
-const statuses = [
-    { name: 'AceOfCreation', type: ActivityType.Listening},
-    { name: 'you', type: ActivityType.Watching}, // hehe, you are not safe lol (jk)
-];
-
-let currentIndex = 0;
-
-// switch status each 10 seconds
-setInterval(() => {
-    const nextStatus = statuses[currentIndex];
-    client.user.setPresence({
-        status: 'online',
-        activities: [nextStatus],
-    });
-
-    currentIndex = (currentIndex + 1) % statuses.length; // go to next status
-}, 10000);
-
-    // test api keys at startup
-    await testApiKeys();
-    
-    // cron job setup (3 minutes and 30 seconds interval)
-    cron.schedule('*/3 * * * *', () => {
-        checkNewVideo();
-    });
-});
-
+testApiKeys(); // test api keys on startup
 client.login(process.env.DISCORD_TOKEN);
