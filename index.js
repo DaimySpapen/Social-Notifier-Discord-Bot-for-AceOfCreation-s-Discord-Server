@@ -7,7 +7,7 @@ require('dotenv').config(); // configuration file for sensitive information (lik
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const videoDataFile = 'videos.json'; // json file for video ids
-let lastVideos = []; // array to save last 3 video ids
+let lastVideos = []; // array to save last 5 video ids
 let isCheckingVideo = false; // lock for overlapping api calls
 
 // api key array voor rotatie
@@ -24,14 +24,16 @@ function loadVideoData() {
     if (fs.existsSync(videoDataFile)) {
         const data = JSON.parse(fs.readFileSync(videoDataFile, 'utf-8'));
         lastVideos = data.videoIds || [];
+    } else {
+        lastVideos = [];
     }
 }
 
-// save the last 3 video ids
+// save only the last 5 video ids
 function saveVideoData() {
     fs.writeFileSync(
         videoDataFile,
-        JSON.stringify({ videoIds: lastVideos.slice(-3) }, null, 2),
+        JSON.stringify({ videoIds: lastVideos.slice(-5) }, null, 2),
         'utf-8'
     );
 }
@@ -43,7 +45,7 @@ function getNextApiKey() {
     return key;
 }
 
-// better api key rotation with fallback
+// better API key rotation with fallback
 async function fetchWithRetries(url) {
     let retries = 0;
     while (retries < apiKeys.length) {
@@ -74,7 +76,7 @@ async function checkNewVideo() {
 
     try {
         const channelId = process.env.YOUTUBE_CHANNEL_ID;
-        const url = `https://www.googleapis.com/youtube/v3/search?channelId=${channelId}&part=snippet,id&order=date&maxResults=1`;
+        const url = `https://www.googleapis.com/youtube/v3/search?channelId=${channelId}&part=snippet,id&order=date&maxResults=5`;
 
         const data = await fetchWithRetries(url);
         if (!data || !data.items || data.items.length === 0) {
@@ -84,26 +86,21 @@ async function checkNewVideo() {
 
         // filter only video items
         const validVideos = data.items.filter(item => item.id.kind === 'youtube#video');
-        const ignoredItems = data.items.filter(item => item.id.kind !== 'youtube#video');
+        const newVideoIds = validVideos.map(video => video.id.videoId);
 
-        if (ignoredItems.length > 0) {
-            console.warn('Non-video items found in response:', ignoredItems.map(item => item.id.kind));
-        }
+        // check if there are new videos
+        const unseenVideos = newVideoIds.filter(videoId => !lastVideos.includes(videoId));
 
-        if (validVideos.length > 0) {
-            const latestVideo = validVideos[0];
-            if (!lastVideos.includes(latestVideo.id.videoId)) {
-                lastVideos.push(latestVideo.id.videoId);
-                notifyDiscord(latestVideo.id.videoId);
-
-                // keep only the last 3 videos
-                lastVideos = lastVideos.slice(-3);
-                saveVideoData();
-            } else {
-                console.log('No new videos found.');
+        if (unseenVideos.length > 0) {
+            for (const videoId of unseenVideos.reverse()) {
+                notifyDiscord(videoId);
+                lastVideos.push(videoId); // add to the buffer
             }
+            // keep only the last 5 videos in memory
+            lastVideos = lastVideos.slice(-5);
+            saveVideoData(); // save updated video list
         } else {
-            console.log('No valid video items found in the response.');
+            console.log('No new videos found.');
         }
     } catch (error) {
         console.error('Error checking for new videos:', error);
@@ -112,7 +109,7 @@ async function checkNewVideo() {
     }
 }
 
-// send notifications to discord
+// send notifications to Discord
 function notifyDiscord(videoId) {
     const channel = client.channels.cache.get(process.env.DISCORD_CHANNEL_ID);
     if (channel) {
@@ -130,7 +127,7 @@ client.once('ready', () => {
 
     const statuses = [
         { name: 'AceOfCreation', type: ActivityType.Listening },
-        { name: 'you', type: ActivityType.Watching }  // funny?:)
+        { name: 'you', type: ActivityType.Watching }
     ];
 
     let currentIndex = 0;
@@ -146,7 +143,7 @@ client.once('ready', () => {
     cron.schedule('*/3 * * * *', checkNewVideo); // every 3 minutes check for video ids
 });
 
-// test api keys on startup
+// test API keys on startup
 async function testApiKeys() {
     console.log('Testing API keys...');
     for (const apiKey of apiKeys) {
@@ -165,5 +162,5 @@ async function testApiKeys() {
     }
 }
 
-testApiKeys(); // test api keys on startup
+testApiKeys(); // test API keys on startup
 client.login(process.env.DISCORD_TOKEN);
